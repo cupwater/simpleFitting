@@ -105,3 +105,14 @@ Mesh sample_to_mesh(cv::Mat shape, cv::Mat color, std::vector<std::array<int, 3>
 
 	return mesh;
 };
+
+/**
+ * Update the vertices coordinate
+ */
+void update_mesh(cv::Mat shape, Mesh &mesh)
+{
+	auto num_vertices = shape.rows / 3;
+	for (auto i = 0; i < num_vertices; ++i) {
+		mesh.vertices[i] = cv::Vec4f(shape.at<float>(i * 3 + 0), shape.at<float>(i * 3 + 1), shape.at<float>(i * 3 + 2), 1.0f);
+	}
+};

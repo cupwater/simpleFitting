@@ -7,13 +7,23 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
+#include <iomanip>
+#include <string>
+
+#include "GL/glew.h"
+#include "GLFW/glfw3.h"
+
+#include "imgui.h"
+#include "imgui_impl_glfw_gl3.h"
 #include "rcr/model.hpp"
 #include "glm/gtc/matrix_transform.hpp"
-#include "helpers.hpp"
-#include "matparse.hpp"
-#include "mesh.hpp"
-
+#include "glm/gtc/type_ptr.hpp"
+#include <glm/mat4x4.hpp>
 #include "fitting/nonlinear_camera_estimation.hpp"
+
+#include "utils/helpers.hpp"
+#include "utils/matparse.hpp"
+#include "utils/mesh.hpp"
 
 
 #define SHAPE_BASIS_NUM 199
@@ -22,6 +32,21 @@
 
 using namespace cv;
 using namespace std;
+
+
+//
+// Global variables
+//
+GLFWwindow* window;
+const int WINDOW_WIDTH = 640, WINDOW_HEIGHT = 480;
+GLuint faceVAO;
+GLuint faceVBO;
+float* faceVertAttribs;
+
+
+GLFWwindow* initialize(const char* windowTitle, const int windowWidth, const int windowHeight);
+std::string readShaderText(const char* shaderFileName);
+GLuint createShaderProgram(const char* vsFileName, const char* fsFileName, GLuint* vertexShader, GLuint* fragmentShader);
 
 //read the 3D landmarks shape and blendshape basis from file
 void readData(vector<Vec3f> &model_points, cv::Mat &shape_basis_3Dlandmarks, cv::Mat &blendshape_basis_3Dlandmarks, string filename)
@@ -237,6 +262,28 @@ int main(int argc, char *argv[])
 
     vector<int> vectex_ids; // their vertex indices
 
+	// **********************
+	// Preprocess
+	// **********************
+
+	// Initialize OpenGL
+	window = initialize("Blend Shape Visualizer v1", WINDOW_WIDTH, WINDOW_HEIGHT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+
+    // Setup ImGui
+    ImGui_ImplGlfwGL3_Init(window, true);
+    bool showTestWindow = false;
+    bool showCoeffWindow1 = true;
+    bool showCoeffWindow2 = true;
+
+	// Prepare render data
+    GLuint faceVShader, faceFShader, faceProgram;
+    faceProgram = createShaderProgram("../shaders/bs.vs", "../shaders/bs.fs", &faceVShader, &faceFShader);
+
+	//Get the fitted mesh, extract the texture:
+	Mesh mesh = sample_to_mesh(mean_shape, mean_color, triangle_list, triangle_list);
+
 	for (;;)
 	{
 		//cap >> frame; // get a new frame from camera
@@ -292,13 +339,202 @@ int main(int argc, char *argv[])
 		
 		cv::Mat finalShape = mean_shape + shapeMat*shape_coefficients + blendshapeMat*blendshape_coefficients;
 
-		//Get the fitted mesh, extract the texture:
-		Mesh mesh = sample_to_mesh(finalShape, mean_color, triangle_list, triangle_list);
+		//update the verticles in the finalShape
+		update_mesh(finalShape, mesh)
 		
-		write_obj(mesh, "shape.obj");
+		// write_obj(mesh, "shape.obj");
 
-		cv::waitKey(0);
+		// cv::waitKey(0);
+
+		int winWidth, winHeight;
+        glfwGetFramebufferSize(window, &winWidth, &winHeight);
+        glViewport(0, 0, winWidth, winHeight);
+        glClearColor(0.0, 0.2, 0.2, 0.0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // Render the face
+        float aspect = static_cast<float>(winWidth) / static_cast<float>(winHeight);
+        glm::mat4 Projection = glm::perspective(glm::radians(45.0f), aspect, 5.f, 1000000.f);
+        glm::mat4 View = glm::lookAt(glm::vec3(0.f, 50000.f, 350000.f), glm::vec3(0.f, 0.f, 0.f), glm::vec3(0.f, 1.f, 0.f));
+        glm::mat4 Model = glm::mat4(1.0f); 
+        glm::mat4 MVP = Projection * View * Model;
+
+        resetFaceVAO(0);
+
+        glBindVertexArray(faceVAO);
+        glUseProgram(faceProgram);
+        glUniformMatrix4fv(glGetUniformLocation(faceProgram, "MVP"), 1, GL_FALSE, glm::value_ptr(MVP));
+        glDrawArrays(GL_TRIANGLES, 0, muModel.triangleList.size());
+
+		glfwSwapBuffers(window);
+		glfwPollEvents();
 
 	}
+
+
+	delete[] faceVertAttribs;
+	glfwDestroyWindow(window);
+	glfwTerminate();
+
+
 	return EXIT_SUCCESS;
 };
+
+
+void setupFaceVAO(Mesh mesh)
+{
+    //GLuint VAO;
+    glGenVertexArrays(1, &faceVAO);
+    glBindVertexArray(faceVAO);
+
+    //GLuint VBO;
+    glGenBuffers(1, &faceVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, faceVBO);
+
+    const int numComponents = 6;
+    faceVertAttribs = new float[mesh.tvi.size() * 3 * numComponents];
+    int i = 0;
+    for (unsigned int fId = 0; fId < mesh.tvi.size(); ++fId)
+    {
+        for (unsigned int vId = 0; vId < 3; ++vId)
+        {
+            unsigned int vertexId = mesh.tvi[fId * 3 + vId];
+
+            // vertex position
+            faceVertAttribs[i++] = mesh.color[vertexId].r / 256.f;
+            faceVertAttribs[i++] = mesh.color[vertexId].g / 256.f;
+            faceVertAttribs[i++] = mesh.color[vertexId].b / 256.f;
+        }
+    }
+
+    glBufferData(GL_ARRAY_BUFFER, mesh.tvi.size() * 3 * numComponents * sizeof(float), faceVertAttribs, GL_DYNAMIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * numComponents, (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(float) * numComponents, (void*)(sizeof(float) * 3));
+    glEnableVertexAttribArray(1);
+
+}
+
+
+void resetFaceVAO(Mesh mesh)
+{
+    glBindVertexArray(faceVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, faceVBO);
+
+    const int numTriangles = mesh.tvi.size() / 3;
+    const int numComponents = 6;
+    for (unsigned int fId = 0; fId < numTriangles; ++fId)
+    {
+        for (unsigned int vId = 0; vId < 3; ++vId)
+        {
+            unsigned int vertexId = muModel.triangleList[fId * 3 + vId];
+            unsigned int i = fId * 3 * numComponents + vId * numComponents;
+
+            // vertex position
+            faceVertAttribs[i + 0] = muModel.vert[vertexId].x;
+            faceVertAttribs[i + 1] = muModel.vert[vertexId].y;
+            faceVertAttribs[i + 2] = muModel.vert[vertexId].z;
+
+            for (int eId = 0; eId < NUM_EXPRESSIONS; ++eId)
+            {
+                if (bsCoeffs[eId] > 0.f)
+                {
+                    faceVertAttribs[i + 0] += bsCoeffs[eId] * expressions[eId].vert[vertexId].x;
+                    faceVertAttribs[i + 1] += bsCoeffs[eId] * expressions[eId].vert[vertexId].y;
+                    faceVertAttribs[i + 2] += bsCoeffs[eId] * expressions[eId].vert[vertexId].z;
+                }
+            }
+        }
+    }
+
+    glBufferData(GL_ARRAY_BUFFER, numTriangles * 3 * numComponents * sizeof(float), faceVertAttribs, GL_DYNAMIC_DRAW);
+}
+
+// Setup GLFW and GLEW, create OpenGL context and window
+GLFWwindow* initialize(const char* windowTitle, const int windowWidth, const int windowHeight)
+{
+	if (!glfwInit())
+		exit(EXIT_FAILURE);
+
+	window = glfwCreateWindow(windowWidth, windowHeight, windowTitle, NULL, NULL);
+	if (!window)
+	{
+		glfwTerminate();
+		exit(EXIT_FAILURE);
+	}
+
+	glfwMakeContextCurrent(window);
+
+	GLenum glewResponse = glewInit();
+	if (glewResponse != GLEW_OK)
+	{
+		// Problem: glewInit failed, something is seriously wrong.
+		std::cerr << "Error: " << glewGetErrorString(glewResponse) << "\n";
+		system("pause");
+		exit(EXIT_FAILURE);
+	}
+	//glfwSwapInterval(1);
+	return window;
+}
+
+std::string readShaderText(const char* shaderFileName)
+{
+	std::string programText;
+	std::ifstream shaderFile(shaderFileName);
+	if (shaderFile.is_open())
+	{
+		std::string line;
+		while (getline(shaderFile, line))
+		{
+			programText.append(line).append("\n");
+		}
+		shaderFile.close();
+	}
+	return programText;
+}
+
+GLuint createShaderProgram(const char* vsFileName, const char* fsFileName, GLuint* vertexShader, GLuint* fragmentShader)
+{
+	*vertexShader = glCreateShader(GL_VERTEX_SHADER);
+	std::string vertexShaderText = readShaderText(vsFileName);
+	const GLchar* p[1];
+	p[0] = vertexShaderText.c_str();
+	glShaderSource(*vertexShader, 1, p, NULL);
+	glCompileShader(*vertexShader);
+
+	GLsizei infoLength;
+	const int MAX_INFO_LENGTH = 500;
+	char infoLog[MAX_INFO_LENGTH];
+	glGetShaderInfoLog(*vertexShader, MAX_INFO_LENGTH, &infoLength, infoLog);
+	if (infoLength > 0)
+	{
+		std::cout << vsFileName << " compilation info: \n" << infoLog;
+	}
+
+	*fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+	std::string fragmentShaderText = readShaderText(fsFileName);
+	p[0] = fragmentShaderText.c_str();
+	glShaderSource(*fragmentShader, 1, p, NULL);
+	glCompileShader(*fragmentShader);
+	glGetShaderInfoLog(*fragmentShader, MAX_INFO_LENGTH, &infoLength, infoLog);
+	if (infoLength > 0)
+	{
+		std::cout << fsFileName << " compilation info: \n" << infoLog;
+	}
+
+	GLuint program = glCreateProgram();
+    glBindAttribLocation (program, 0, "vPos");
+    glBindAttribLocation (program, 1, "vColor");
+
+	glAttachShader(program, *vertexShader);
+	glAttachShader(program, *fragmentShader);
+	glLinkProgram(program);
+	glGetProgramInfoLog(program, MAX_INFO_LENGTH, &infoLength, infoLog);
+	if (infoLength > 0)
+	{
+		std::cout << "Shader program compilation info: \n" << infoLog;
+	}
+
+	return program;
+}
